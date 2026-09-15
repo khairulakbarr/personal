@@ -1,0 +1,351 @@
+<script>
+    // =========================================================================
+    // URL DEPLOY WEB APP APPS SCRIPT:
+    // =========================================================================
+    const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw0DKFFFAa12a4PCO09YLeQZq7O4AOLMUD1htckdW98-2dYisoVnV0HJwVY9dTWUNCU5Q/exec";
+    // =========================================================================
+
+    let transactions = [];
+    let activeDetailName = null;
+
+    function formatRupiah(amount) {
+      return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
+    }
+
+    function formatDateReadable(dateInput) {
+      if (!dateInput) return '-';
+      const d = new Date(dateInput);
+      if (isNaN(d.getTime())) return dateInput;
+      
+      return d.toLocaleDateString('id-ID', {
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      });
+    }
+
+    // 1. OPTIMASI LOAD: Load dari localStorage dulu secara serentak (0 detik)
+    async function loadDataFromGAS() {
+      const localData = localStorage.getItem('personal_receivables_db');
+      if (localData) {
+        try {
+          transactions = JSON.parse(localData);
+          renderDashboard();
+        } catch (e) {
+          console.error("Gagal parse local storage", e);
+        }
+      }
+
+      if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("GANTI_DENGAN")) {
+        if (!localData) {
+          transactions = [
+            { id: '1', name: 'Budi Santoso', type: 'Hutang', source: 'BCA', to: 'Rek Budi', amount: 1500000, date: '2026-09-01', note: 'Pinjaman awal' },
+            { id: '2', name: 'Budi Santoso', type: 'Bayar', source: 'Cash', to: 'BCA', amount: 500000, date: '2026-09-05', note: 'Cicilan 1' }
+          ];
+          renderDashboard();
+        }
+        return;
+      }
+
+      // Sync di background tanpa menghambat loading awal
+      try {
+        const response = await fetch(APPS_SCRIPT_URL);
+        const data = await response.json();
+        transactions = data;
+        localStorage.setItem('personal_receivables_db', JSON.stringify(data));
+        renderDashboard();
+      } catch (error) {
+        console.error("Gagal sinkronisasi dari Google Sheets:", error);
+      }
+    }
+
+    function getSummaries() {
+      const map = {};
+      transactions.forEach(t => {
+        const nameKey = t.name ? t.name.trim() : '';
+        if (!nameKey) return;
+
+        if (!map[nameKey]) {
+          map[nameKey] = { name: nameKey, totalHutang: 0, totalBayar: 0, sisaHutang: 0, status: 'LUNAS', lastTransaction: t.date };
+        }
+        const amt = parseFloat(t.amount) || 0;
+        if (t.type === 'Hutang') map[nameKey].totalHutang += amt;
+        else if (t.type === 'Bayar') map[nameKey].totalBayar += amt;
+        if (new Date(t.date) > new Date(map[nameKey].lastTransaction)) map[nameKey].lastTransaction = t.date;
+      });
+
+      Object.values(map).forEach(item => {
+        item.sisaHutang = item.totalHutang - item.totalBayar;
+        item.status = item.sisaHutang > 0 ? 'BELUM LUNAS' : 'LUNAS';
+      });
+
+      return Object.values(map);
+    }
+
+    function renderDashboard() {
+      const summaries = getSummaries();
+      const searchQuery = document.getElementById('search-input').value.toLowerCase();
+      const statusFilter = document.getElementById('status-filter').value;
+
+      let totalSisa = 0, totalBayar = 0, totalPinjam = 0, activeCount = 0;
+
+      summaries.forEach(s => {
+        totalPinjam += s.totalHutang;
+        totalBayar += s.totalBayar;
+        if (s.sisaHutang > 0) { totalSisa += s.sisaHutang; activeCount++; }
+      });
+
+      document.getElementById('global-sisa-piutang').innerText = formatRupiah(totalSisa);
+      document.getElementById('global-total-bayar').innerText = formatRupiah(totalBayar);
+      document.getElementById('global-total-pinjaman').innerText = formatRupiah(totalPinjam);
+      document.getElementById('global-borrowers-count').innerText = `${activeCount} Peminjam`;
+
+      const filtered = summaries.filter(s => {
+        return s.name.toLowerCase().includes(searchQuery) && (statusFilter === 'ALL' || s.status === statusFilter);
+      });
+
+      const grid = document.getElementById('borrowers-grid');
+      if (filtered.length === 0) {
+        grid.innerHTML = `
+          <div class="col-span-full py-20 flex flex-col items-center justify-center text-slate-500 glass-card rounded-3xl border-dashed border-2 border-white/10">
+            <div class="p-4 bg-white/5 rounded-full mb-3"><i data-lucide="ghost" class="w-8 h-8 text-slate-600"></i></div>
+            <p class="font-bold text-slate-400 text-sm">Tidak ada data ditemukan</p>
+          </div>
+        `;
+        if (window.lucide) lucide.createIcons();
+        return;
+      }
+
+      grid.innerHTML = filtered.map(s => {
+        const isLunas = s.status === 'LUNAS';
+        const badgeStyle = isLunas 
+          ? 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/30' 
+          : 'bg-rose-500/10 text-rose-400 ring-rose-500/30';
+        
+        const percentPaid = s.totalHutang > 0 ? Math.min(100, Math.round((s.totalBayar / s.totalHutang) * 100)) : 100;
+        const initial = s.name.charAt(0).toUpperCase();
+
+        return `
+          <div class="glass-card rounded-3xl p-6 flex flex-col justify-between group hover:-translate-y-1 hover:border-white/20 transition-all duration-300">
+            <div>
+              <div class="flex items-start justify-between gap-3 mb-5">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-700 to-slate-800 border border-white/10 flex items-center justify-center font-bold text-sm text-white shadow-inner group-hover:shadow-brand-500/20 transition-all">
+                    ${initial}
+                  </div>
+                  <div>
+                    <h3 class="font-extrabold text-base text-white truncate max-w-[140px] tracking-tight">${escapeHtml(s.name)}</h3>
+                    <p class="text-[10px] text-slate-500 font-medium mt-0.5">Update: ${formatDateReadable(s.lastTransaction)}</p>
+                  </div>
+                </div>
+                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-[9px] font-extrabold uppercase tracking-widest ring-1 ring-inset ${badgeStyle}">
+                  ${s.status}
+                </span>
+              </div>
+              
+              <div class="bg-black/30 p-4 rounded-2xl border border-white/5 space-y-3">
+                <div class="flex justify-between items-center text-xs">
+                  <span class="text-slate-400 font-medium">Pinjaman</span>
+                  <span class="font-bold text-slate-200">${formatRupiah(s.totalHutang)}</span>
+                </div>
+                <div class="flex justify-between items-center text-xs">
+                  <span class="text-slate-400 font-medium">Dibayar</span>
+                  <span class="font-bold text-emerald-400">${formatRupiah(s.totalBayar)}</span>
+                </div>
+                <div class="h-px w-full bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
+                <div class="flex justify-between items-center text-sm">
+                  <span class="text-slate-300 font-bold">Sisa Hutang</span>
+                  <span class="font-extrabold ${isLunas ? 'text-emerald-400' : 'text-rose-400'}">${formatRupiah(s.sisaHutang)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-5 pt-5 border-t border-white/5 flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <div class="flex justify-between text-[10px] text-slate-400 font-bold mb-1.5 uppercase tracking-wider">
+                  <span>Progres</span>
+                  <span class="text-brand-400">${percentPaid}%</span>
+                </div>
+                <div class="w-full bg-black/50 rounded-full h-1.5 overflow-hidden ring-1 ring-white/5 inset-ring">
+                  <div class="bg-gradient-to-r from-brand-600 to-brand-400 h-1.5 rounded-full transition-all duration-700 ease-out" style="width: ${percentPaid}%"></div>
+                </div>
+              </div>
+              <button onclick="openDetailModal('${escapeHtml(s.name)}')" class="shrink-0 p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-white transition-all hover:scale-105 active:scale-95" title="Lihat Riwayat">
+                <i data-lucide="arrow-right" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      updateDatalist();
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function openModal(id, contentId) {
+      const modal = document.getElementById(id);
+      const content = document.getElementById(contentId);
+      modal.classList.remove('hidden');
+      void modal.offsetWidth; 
+      modal.classList.add('opacity-100');
+      content.classList.remove('scale-95');
+      content.classList.add('scale-100');
+    }
+
+    function closeModal(id, contentId) {
+      const modal = document.getElementById(id);
+      const content = document.getElementById(contentId);
+      modal.classList.remove('opacity-100');
+      content.classList.remove('scale-100');
+      content.classList.add('scale-95');
+      setTimeout(() => modal.classList.add('hidden'), 300);
+    }
+
+    function openTransactionModal(defaultName = '') {
+      document.getElementById('transaction-form').reset();
+      document.getElementById('form-date').value = new Date().toISOString().split('T')[0];
+      if (defaultName) document.getElementById('form-name').value = defaultName;
+      openModal('transaction-modal', 'transaction-modal-content');
+    }
+
+    function closeTransactionModal() {
+      closeModal('transaction-modal', 'transaction-modal-content');
+    }
+
+    // 2. OPTIMASI TAMBAH: Update UI langsung, kirim data ke server di background
+    function handleFormSubmit(e) {
+      e.preventDefault();
+
+      const newTrans = {
+        action: 'add',
+        id: Date.now().toString(),
+        name: document.getElementById('form-name').value.trim(),
+        type: document.querySelector('input[name="form-type"]:checked').value,
+        source: document.getElementById('form-source').value.trim(),
+        to: document.getElementById('form-to').value.trim(),
+        amount: parseFloat(document.getElementById('form-amount').value),
+        date: document.getElementById('form-date').value,
+        note: document.getElementById('form-note').value.trim()
+      };
+
+      // Update lokal secara instan
+      transactions.push(newTrans);
+      localStorage.setItem('personal_receivables_db', JSON.stringify(transactions));
+      closeTransactionModal();
+      renderDashboard();
+
+      if (activeDetailName && activeDetailName.toLowerCase() === newTrans.name.toLowerCase()) {
+        openDetailModal(activeDetailName);
+      }
+
+      // Request kirim ke Apps Script berjalan asynchronous di latar belakang
+      if (APPS_SCRIPT_URL && !APPS_SCRIPT_URL.includes("GANTI_DENGAN")) {
+        fetch(APPS_SCRIPT_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newTrans)
+        }).catch(err => console.error("Gagal simpan ke server:", err));
+      }
+    }
+
+    function openDetailModal(name) {
+      activeDetailName = name;
+      const borrowerTrans = transactions.filter(t => t.name.toLowerCase() === name.toLowerCase());
+      
+      let totalHutang = 0, totalBayar = 0;
+      borrowerTrans.forEach(t => { t.type === 'Hutang' ? totalHutang += t.amount : totalBayar += t.amount; });
+      
+      document.getElementById('detail-name').innerText = name;
+      document.getElementById('detail-avatar').innerText = name.charAt(0).toUpperCase();
+      document.getElementById('detail-total-hutang').innerText = formatRupiah(totalHutang);
+      document.getElementById('detail-total-bayar').innerText = formatRupiah(totalBayar);
+      document.getElementById('detail-sisa-hutang').innerText = formatRupiah(totalHutang - totalBayar);
+
+      const tbody = document.getElementById('detail-history-tbody');
+      tbody.innerHTML = borrowerTrans.sort((a,b) => new Date(b.date) - new Date(a.date)).map(t => {
+        const isHutang = t.type === 'Hutang';
+        return `
+          <tr class="hover:bg-white/[0.02] transition-colors">
+            <td class="p-4 text-slate-400 whitespace-nowrap text-xs font-medium">${formatDateReadable(t.date)}</td>
+            <td class="p-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-widest ${isHutang ? 'bg-rose-500/10 text-rose-400 ring-1 ring-rose-500/20' : 'bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20'}">
+                ${t.type}
+              </span>
+            </td>
+            <td class="p-4">
+              <div class="flex items-center gap-2 text-xs font-bold">
+                <span class="text-white">${escapeHtml(t.source)}</span>
+                <i data-lucide="arrow-right" class="w-3 h-3 text-slate-500"></i>
+                <span class="text-white">${escapeHtml(t.to)}</span>
+              </div>
+              ${t.note ? `<div class="text-[10px] text-slate-500 font-medium mt-1">"${escapeHtml(t.note)}"</div>` : ''}
+            </td>
+            <td class="p-4 text-right font-extrabold text-white whitespace-nowrap">${formatRupiah(t.amount)}</td>
+            <td class="p-4 text-center">
+              <button onclick="deleteTransaction('${t.id}')" class="text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all p-2 rounded-xl" title="Hapus">
+                <i data-lucide="trash-2" class="w-4 h-4"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      document.getElementById('add-trans-for-borrower').onclick = () => {
+        closeDetailModal();
+        setTimeout(() => openTransactionModal(name), 300);
+      };
+
+      openModal('detail-modal', 'detail-modal-content');
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function closeDetailModal() {
+      activeDetailName = null;
+      closeModal('detail-modal', 'detail-modal-content');
+    }
+
+    // 3. OPTIMASI HAPUS: Hapus dari UI dan LocalStorage seketika (0 detik), server diproses di background
+    function deleteTransaction(id) {
+      if (!confirm('Hapus histori transaksi ini secara permanen?')) return;
+
+      // Hapus dari data lokal dan perbarui layar secara instan
+      transactions = transactions.filter(t => t.id !== id);
+      localStorage.setItem('personal_receivables_db', JSON.stringify(transactions));
+      renderDashboard();
+
+      if (activeDetailName) {
+        const remaining = transactions.filter(t => t.name.toLowerCase() === activeDetailName.toLowerCase());
+        if (remaining.length === 0) {
+          closeDetailModal();
+        } else {
+          openDetailModal(activeDetailName);
+        }
+      }
+
+      // Request hapus di Apps Script berjalan di latar belakang tanpa mengunci UI
+      if (APPS_SCRIPT_URL && !APPS_SCRIPT_URL.includes("GANTI_DENGAN")) {
+        fetch(APPS_SCRIPT_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'delete', id: id })
+        }).catch(err => console.error("Gagal hapus di server:", err));
+      }
+    }
+
+    function updateDatalist() {
+      const names = [...new Set(transactions.map(t => t.name))];
+      document.getElementById('borrower-suggestions').innerHTML = names.map(n => `<option value="${escapeHtml(n)}">`).join('');
+    }
+
+    function escapeHtml(str) {
+      return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      if (window.lucide) lucide.createIcons();
+      loadDataFromGAS();
+    });
+  </script>
